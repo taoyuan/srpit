@@ -1,34 +1,188 @@
-[![Build Status](https://travis-ci.org/{{github-user-name}}/{{github-app-name}}.svg?branch=master)](https://travis-ci.org/{{github-user-name}}/{{github-app-name}}.svg?branch=master)
-[![Coverage Status](https://coveralls.io/repos/github/{{github-user-name}}/{{github-app-name}}/badge.svg?branch=master)](https://coveralls.io/github/{{github-user-name}}/{{github-app-name}}?branch=master)
-[![MIT license](http://img.shields.io/badge/license-MIT-brightgreen.svg)](http://opensource.org/licenses/MIT)
+# srpit
 
-# Using this module in other modules
+> A javascript SRP library for both nodejs and browser.
 
-Here is a quick example of how this module can be used in other modules. The [TypeScript Module Resolution Logic](https://www.typescriptlang.org/docs/handbook/module-resolution.html) makes it quite easy. The file `src/index.ts` is a [barrel](https://basarat.gitbooks.io/typescript/content/docs/tips/barrel.html) that re-exports selected exports from other files. The _package.json_ file contains `main` attribute that points to the generated `lib/index.js` file and `typings` attribute that points to the generated `lib/index.d.ts` file.
+Implementation of the [SRP Authentication and Key Exchange System](http://tools.ietf.org/html/rfc2945) and protocols in [Secure
+Remote Password (SRP) Protocol for TLS Authentication](http://tools.ietf.org/html/rfc5054)
 
-> If you are planning to have code in multiple files (which is quite natural for a NodeJS module) that users can import, make sure you update `src/index.ts` file appropriately.
+SRP is an interactive protocol which allows a server to confirm that some client knows a password, and to derive a strong shared session key, without revealing what the password is to an eavesdropper. In addition, the server does not hold the actual password: instead it stores a "verifier" created by the client. If the server's private data is revealed (by a server compromise), the verifier cannot be used directly to impersonate the client.
 
-Now assuming you have published this amazing module to _npm_ with the name `my-amazing-lib`, and installed it in the module in which you need it -
+This module provides both client and server implementations of SRP-6a for node.js. They are interoperable with [Mozilla Identity-Attached Services](https://wiki.mozilla.org/Identity/AttachedServices/KeyServerProtocol)
 
-- To use the `Greeter` class in a TypeScript file -
+* [Installation](#installation)
+* [Running Tests](#running-tests)
+* [Usage](#how-to-use-it)
+* [API Reference](#api-reference)
+* [Resources](#resources)
 
-```ts
-import { Greeter } from "my-amazing-lib";
+## Installation
 
-const greeter = new Greeter("World!");
-greeter.greet();
+`npm install srpit`
+
+or `git clone` this archive and run `npm install` in it.
+
+## Running Tests
+
+Run `npm test`.
+
+Tests include vectors from:
+- [RFC 5054, Appendix B](https://tools.ietf.org/html/rfc5054#appendix-B).
+- [Mozilla Identity Attached Services](https://wiki.mozilla.org/Identity/AttachedServices/KeyServerProtocol)
+
+## How to use it
+
+First, you must decide on the "parameters". This module provides a variety of pre-packaged parameter sets, at various levels of security (more secure parameters take longer to run). The "2048"-bit parameters are probably fairly secure for the near future. Both client and server must use the same parameters.
+
+    const params = srpit.PARAMS["2048"];
+
+Each client will have a unique "identity" string. This is typically a username or email address. Clients will also use a unique "salt", which can be randomly generated during account creation. The salt is generally stored on the server, and must be provided to the client each time they try to connect.
+
+Note that all APIs accept and return node.js Buffer objects, not strings.
+
+### Client Setup: Account Creation
+
+The client feeds their identity string, password, and salt, into `computeVerifier`. This returns the Verifier buffer. The Verifier must be delivered to the server, typically during a "create account" process. Note that the Verifier can be used to mount a dictionary attack against the user's password, so it should be treated with care (and delivered securely to the server).
+
+```typescript
+import {computeVerifier} from "srpit";
+
+const verifier = computeVerifier(bitsOrParams, salt, identity, password);
+createAccount(identity, verifier);
 ```
 
-- To use the `Greeter` class in a JavaScript file -
+The server should store the identity, salt, and verifier in a table, indexed by the identity for later access. The server will provide the salt to anyone who asks, but should never reveal the verifier to anybody.
 
-```js
-const Greeter = require('my-amazing-lib').Greeter;
+### Login
 
-const greeter = new Greeter('World!');
-greeter.greet();
+Later, when the client wants to connect to the server, it starts by submitting its identity string, and retrieving the salt.
+
+Then the client needs to create a secret random string called `secret1`, using `srp.genKey()`. The protocol uses this to make sure that each instance of the protocol is unique.
+
+Then, create a new `srp.Client` instance with parameters, identity, salt, password, and `secret1`.
+
+The client must then ask this object for the derived `srpA` value, and deliver srpA to the server.
+
+```typescript
+import {Client} from "srpit";
+
+const secret1 = await srpit.genKey();
+const c = new Client(bitsOrParams, salt, identity, password, secret1);
+const A = c.computeA();
+sendToServer(A);
+
 ```
 
-## Setting travis and coveralls badges
-1. Sign in to [travis](https://travis-ci.org/) and activate the build for your project.
-2. Sign in to [coveralls](https://coveralls.io/) and activate the build for your project.
-3. Replace {{github-user-name}}/{{github-app-name}} with your repo details like: "ospatil/generator-node-typescript".
+Meanwhile, the server is doing something similar, except using the Verifier instead of the salt/identity/password, and using its own secret random string.
+
+```typescript
+import {Server} from "srpit";
+
+const secret2 = await srpit.genKey();
+const s = new Server(bitsOrParams, verifier, secret2);
+const B = s.computeB();
+sendToClient(B);
+
+```
+
+When the client receives the server's B value, it stuffs it into the Client instance. This allows it to extract two values: `M1` and `K`.
+
+```typescript
+c.setB(B);
+const M1 = c.computeM1();
+sendToServer(M1);
+const K = c.computeK();
+```
+
+`M1` is a challenge value, created by the client and delivered to the server. After accepting the client's `A` value, the server can check `M1` to determine whether or not the client really knew the password. The server can also obtain its own `K` value.
+
+```typescript
+s.setA(A)
+s.checkM1(M1); // throws error if wrong
+const K = s.computeK();
+```
+
+If the password passed into `Client()` is the same as the one passed into `computeVerifier()`, then the server will accept `M1`, and the `K` on both sides will be the same.
+
+`K` is a strong random string, suitable for use as a session key to encrypt or authenticate subsequent messages.
+
+If the password was different, then `s.checkM1()` will throw an error, and the two `K` values will be unrelated random strings.
+
+The overall conversation looks like this:
+
+    Client:                             Server:
+     p = params["2048"]                  p = params["2048"]
+     s1 = genKey()                       s2 = genKey()
+     c = new Client(p,salt,id,pw,s1)     s = new Server(p,verifier,s2)
+     A = c.computeA()            A---->  s.setA(A)
+     c.setB(B)                <-----B    B = s.computeB()
+     M1 = c.computeM1()         M1---->  s.checkM1(M1) // may throw error
+     K = c.computeK()                    K = s.computeK()
+
+### What a "Session" Means
+
+Basic login can be done by simply calling `s.checkM1()`: if it doesn't throw an exception, the client knew the right password. However, by itself, this does not bind knowledge of the password to anything else. If the A/B/M1 values were delivered over an insecure channel, controlled by an attacker, they could simply wait until `M1` was accepted, and then take control of the channel.
+
+Delivering these values over a secure channel, such as an HTTPS connection, is better. If the HTTP client correctly checks the server certificate, and the certificate was correctly issued, then you can exclude a man-in-the-middle attacker.
+
+The safest approach is to *create* a secure channel with the generated session key `K`, using it to encrypt and authenticate all the messages which follow.
+
+## API Reference
+
+Module contents:
+
+- **`PARAMS[]`**
+
+  table of parameter sets. Pass a property from this object into the Client and Server constructors.
+- **`genKey(numBytes, callback)`**
+
+  async function to generate the ephemeral secrets passed into the Client and Server constructors.
+- **`computeVerifier(bitsOrParams, salt, identity, password) -> V`**
+
+  produces a Verifier, which should be given to the server during account creation. The Verifier will be passed into the Server constructor during login.
+- **`Client(bitsOrParams, salt, identity, password, secret1) -> c`**
+
+  constructor for the client-side of SRP. secret1 should come from genKey(). The Client object has the following methods:
+- **`Server(bitsOrParams, verifier, secret2) -> s`**
+
+  constructor for the server-side of SRP. secret2 should come from genKey(). If the Server object must be persisted (e.g. in a database) between protocol phases, simply store secret2 and re-construct the Server with the same values. The Server object has the following methods:
+
+`Client` methods:
+
+- **`computeA() -> A`**
+
+  produce the A value that will be sent to the server.
+- **`setB(B)`**
+
+  this accepts the B value from the server. M1 and K cannot be accessed until setB() has been called.
+- **`computeM1() -> M1`**
+
+  produce the M1 key-confirmation message. This should be sent to the server, which can check it to make sure the client really knew the correct password. setB must be called before computeM1.
+- **`computeK() -> K`**
+
+  produce the shared key K. If the password and verifier matched, both client and server will get the same value for K. setB must be called before computeK.
+
+`Server` methods:
+
+- **`computeB() -> B`**
+
+  produce the B value that will be sent to the client.
+- **`setA(A)`**
+
+  this accepts the A value from the client. checkM1 and computeK cannot be called until setA has been called.
+- **`checkM1(M1)`**
+
+  this checks the client's M1 key-confirmation message. If the client's password matched the server's verifier, checkM1() will complete without error. If they do not match, checkM1() will throw an error.
+- **`computeK() -> K`**
+
+  produce the shared key K. setA must be called before computeK.
+
+## Resources
+
+- [The Stanford SRP Homepage](http://srp.stanford.edu/)
+- RFC 2945: [The SRP Authentication and Key Exchange System](http://tools.ietf.org/html/rfc2945)
+- RFC 5054: [Using the Secure Remote Password (SRP) Protocol for TLS Authentication](http://tools.ietf.org/html/rfc5054)
+- Wikipedia: [The Secure Remote Password protocol](http://en.wikipedia.org/wiki/Secure_Remote_Password_protocol)
+
+## License
+
+MIT

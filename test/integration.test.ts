@@ -12,10 +12,10 @@ describe("integration", () => {
   let a, b: Buffer;
   let verifier: Buffer;
 
-  before(() => {
+  before(async () => {
     verifier = computeVerifier(bits, salt, identity, password);
-    a = genKey(64);
-    b = genKey(32);
+    a = await genKey(64);
+    b = await genKey(32);
   });
 
   it('verifier', () => {

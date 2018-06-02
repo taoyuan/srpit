@@ -150,7 +150,7 @@ export function getk(params: Params) {
  *
  * returns: nothing, but runs callback with a Buffer
  */
-export function genKey(bytes: number = 32): Buffer {
+export async function genKey(bytes: number = 32): Promise<Buffer> {
   return randomBytes(bytes);
 }
 
