@@ -1,5 +1,7 @@
 # srpit
 
+[![Greenkeeper badge](https://badges.greenkeeper.io/taoyuan/srpit.svg)](https://greenkeeper.io/)
+
 > A javascript SRP library for both nodejs and browser.
 
 Implementation of the [SRP Authentication and Key Exchange System](http://tools.ietf.org/html/rfc2945) and protocols in [Secure
